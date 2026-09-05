@@ -36,6 +36,90 @@ class Client_Reporter_Connector
                 'end'   => array('sanitize_callback' => 'sanitize_text_field'),
             ),
         )));
+
+        register_rest_route(CLIENT_REPORTER_WP_NAMESPACE, '/updates', array_merge($args, array(
+            'callback' => array(__CLASS__, 'updates'),
+            'args'     => array(
+                'from' => array('sanitize_callback' => 'sanitize_text_field'),
+                'to'   => array('sanitize_callback' => 'sanitize_text_field'),
+            ),
+        )));
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Update history                                                        */
+    /* --------------------------------------------------------------------- */
+
+    /**
+     * Record applied core/plugin/theme updates as WordPress performs them, so
+     * the report can say what was updated and when. Appends to a capped log
+     * option; never removes or modifies anything else.
+     *
+     * @param \WP_Upgrader $upgrader   The upgrader instance (unused).
+     * @param array        $hook_extra Details of what was updated.
+     */
+    public static function record_updates($upgrader, $hook_extra)
+    {
+        if (! is_array($hook_extra) || (isset($hook_extra['action']) && 'update' !== $hook_extra['action'])) {
+            return;
+        }
+
+        $type = isset($hook_extra['type']) ? $hook_extra['type'] : '';
+        $now  = current_time('c');
+        $entries = array();
+
+        if ('plugin' === $type) {
+            if (! function_exists('get_plugin_data')) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+            $plugins = isset($hook_extra['plugins']) ? (array) $hook_extra['plugins'] : array();
+            foreach ($plugins as $file) {
+                $path = WP_PLUGIN_DIR . '/' . $file;
+                $data = is_readable($path) ? get_plugin_data($path, false, false) : array();
+                $entries[] = array(
+                    'type'    => 'plugin',
+                    'name'    => ! empty($data['Name']) ? $data['Name'] : $file,
+                    'version' => isset($data['Version']) ? $data['Version'] : '',
+                    'date'    => $now,
+                );
+            }
+        } elseif ('theme' === $type) {
+            $themes = isset($hook_extra['themes']) ? (array) $hook_extra['themes'] : array();
+            foreach ($themes as $stylesheet) {
+                $theme = wp_get_theme($stylesheet);
+                $entries[] = array(
+                    'type'    => 'theme',
+                    'name'    => $theme->exists() ? $theme->get('Name') : $stylesheet,
+                    'version' => $theme->exists() ? $theme->get('Version') : '',
+                    'date'    => $now,
+                );
+            }
+        } elseif ('core' === $type) {
+            $entries[] = array(
+                'type'    => 'core',
+                'name'    => 'WordPress core',
+                'version' => get_bloginfo('version'),
+                'date'    => $now,
+            );
+        }
+
+        if (empty($entries)) {
+            return;
+        }
+
+        $log = get_option(CLIENT_REPORTER_WP_UPDATE_LOG, array());
+        if (! is_array($log)) {
+            $log = array();
+        }
+
+        $log = array_merge($log, $entries);
+
+        // Keep the log bounded; the report only ever reads a recent window.
+        if (count($log) > 250) {
+            $log = array_slice($log, -250);
+        }
+
+        update_option(CLIENT_REPORTER_WP_UPDATE_LOG, $log, false);
     }
 
     /* --------------------------------------------------------------------- */
@@ -177,6 +261,51 @@ class Client_Reporter_Connector
             'users'              => (int) count_users()['total_users'],
             'admins'             => count($admins),
             'site_health'        => $core_update_available || count($plugin_list) > 0 ? 'attention' : 'good',
+        ));
+    }
+
+    /**
+     * The applied-update history, optionally limited to a from/to date window.
+     *
+     * @param WP_REST_Request $request
+     */
+    public static function updates($request)
+    {
+        $log = get_option(CLIENT_REPORTER_WP_UPDATE_LOG, array());
+        if (! is_array($log)) {
+            $log = array();
+        }
+
+        $from = $request->get_param('from');
+        $to   = $request->get_param('to');
+        $from_ts = $from ? strtotime($from . ' 00:00:00') : null;
+        $to_ts   = $to ? strtotime($to . ' 23:59:59') : null;
+
+        $entries = array();
+        $counts  = array('core' => 0, 'plugin' => 0, 'theme' => 0);
+
+        foreach ($log as $entry) {
+            $when = isset($entry['date']) ? strtotime($entry['date']) : false;
+            if ($from_ts && (false === $when || $when < $from_ts)) {
+                continue;
+            }
+            if ($to_ts && (false === $when || $when > $to_ts)) {
+                continue;
+            }
+
+            $type = isset($entry['type']) ? $entry['type'] : '';
+            if (isset($counts[$type])) {
+                $counts[$type]++;
+            }
+            $entries[] = $entry;
+        }
+
+        return rest_ensure_response(array(
+            'total'   => count($entries),
+            'core'    => $counts['core'],
+            'plugins' => $counts['plugin'],
+            'themes'  => $counts['theme'],
+            'entries' => array_values($entries),
         ));
     }
 
