@@ -1,0 +1,48 @@
+name: Release
+
+# Build a clean plugin ZIP and publish a GitHub release whenever a version
+# tag (e.g. v0.2.0) is pushed. The ZIP contains a single top-level
+# client-reporter/ folder, so it installs directly via
+# Plugins -> Add New -> Upload Plugin in WordPress.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Verify the tag matches the plugin header version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          header="$(grep -oiP 'Version:\s*\K[0-9][0-9.]*' client-reporter.php | head -1)"
+          echo "Tag version: $tag / plugin header version: $header"
+          if [ "$tag" != "$header" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the plugin header version ($header). Update the Version header (and readme.txt) before tagging."
+            exit 1
+          fi
+
+      - name: Build the plugin ZIP
+        run: |
+          mkdir -p build/client-reporter
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='build' \
+            ./ build/client-reporter/
+          (cd build && zip -rq client-reporter.zip client-reporter)
+          unzip -l build/client-reporter.zip
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/client-reporter.zip
+          generate_release_notes: true
