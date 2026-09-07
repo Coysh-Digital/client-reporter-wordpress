@@ -4,7 +4,7 @@ Tags: reporting, agency, uptime, woocommerce, client-reporting
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: MIT
 
 Securely exposes read-only WordPress status, updates and WooCommerce data to a self-hosted Client Reporter installation.
@@ -44,6 +44,9 @@ nonce, using a shared connection code. The plugin rejects unsigned requests, sta
 4. Back in Client Reporter, press “Save & verify”.
 
 == Changelog ==
+
+= 0.2.0 =
+* Record and expose applied update history, so reports can show what was updated and when.
 
 = 0.1.0 =
 * Initial release: signed read-only connector for site status, updates and WooCommerce.
