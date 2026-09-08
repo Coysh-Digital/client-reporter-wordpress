@@ -1,13 +1,13 @@
 === Client Reporter Connector ===
 Contributors: timcoysh
-Tags: reporting, agency, uptime, woocommerce, client-reporting
+Tags: reporting, agency, uptime, woocommerce, gravity forms, ninja forms
 Requires at least: 6.0
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 0.2.0
+Stable tag: 0.3.0
 License: MIT
 
-Securely exposes read-only WordPress status, updates and WooCommerce data to a self-hosted Client Reporter installation.
+Securely exposes read-only WordPress status, updates, WooCommerce and form-submission data to a self-hosted Client Reporter installation.
 
 == Description ==
 
@@ -44,6 +44,9 @@ nonce, using a shared connection code. The plugin rejects unsigned requests, sta
 4. Back in Client Reporter, press “Save & verify”.
 
 == Changelog ==
+
+= 0.3.0 =
+* Added a read-only forms endpoint that reports Gravity Forms and Ninja Forms submission counts for the reporting period, with a per-form breakdown and a daily series.
 
 = 0.2.0 =
 * Record and expose applied update history, so reports can show what was updated and when.

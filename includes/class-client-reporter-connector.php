@@ -44,6 +44,14 @@ class Client_Reporter_Connector
                 'to'   => array('sanitize_callback' => 'sanitize_text_field'),
             ),
         )));
+
+        register_rest_route(CLIENT_REPORTER_WP_NAMESPACE, '/forms', array_merge($args, array(
+            'callback' => array(__CLASS__, 'forms'),
+            'args'     => array(
+                'start' => array('sanitize_callback' => 'sanitize_text_field'),
+                'end'   => array('sanitize_callback' => 'sanitize_text_field'),
+            ),
+        )));
     }
 
     /* --------------------------------------------------------------------- */
@@ -200,6 +208,8 @@ class Client_Reporter_Connector
             'version'           => CLIENT_REPORTER_WP_VERSION,
             'wordpress_version' => get_bloginfo('version'),
             'woocommerce'       => self::woocommerce_active(),
+            'gravity_forms'     => self::gravity_forms_active(),
+            'ninja_forms'       => self::ninja_forms_active(),
         ));
     }
 
@@ -366,5 +376,199 @@ class Client_Reporter_Connector
     private static function woocommerce_active()
     {
         return class_exists('WooCommerce');
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Form submissions (Gravity Forms / Ninja Forms)                        */
+    /* --------------------------------------------------------------------- */
+
+    /**
+     * Form-submission counts for the reporting period from Gravity Forms and/or
+     * Ninja Forms, if either is active. Returns a per-form breakdown and a
+     * zero-filled daily series, so the report can chart responses over time.
+     *
+     * @param WP_REST_Request $request
+     */
+    public static function forms($request)
+    {
+        $gravity = self::gravity_forms_active();
+        $ninja   = self::ninja_forms_active();
+
+        if (! $gravity && ! $ninja) {
+            return rest_ensure_response(array('active' => false));
+        }
+
+        $start = $request->get_param('start') ? $request->get_param('start') : gmdate('Y-m-01');
+        $end   = $request->get_param('end') ? $request->get_param('end') : gmdate('Y-m-t');
+
+        // Zero-filled daily buckets across the whole window, so quiet days are
+        // still charted as zero rather than dropped.
+        $days     = array();
+        $start_ts = strtotime($start . ' 00:00:00');
+        $end_ts   = strtotime($end . ' 23:59:59');
+        for ($t = $start_ts; $t !== false && $t <= $end_ts; $t += DAY_IN_SECONDS) {
+            $days[gmdate('Y-m-d', $t)] = 0;
+        }
+
+        $forms     = array();
+        $providers = array();
+
+        if ($gravity) {
+            $providers[] = 'gravity';
+            self::collect_gravity_forms($start, $end, $days, $forms);
+        }
+
+        if ($ninja) {
+            $providers[] = 'ninja';
+            self::collect_ninja_forms($start, $end, $days, $forms);
+        }
+
+        usort($forms, function ($a, $b) {
+            return $b['submissions'] <=> $a['submissions'];
+        });
+
+        $timeseries = array();
+        $total      = 0;
+        foreach ($days as $date => $count) {
+            $timeseries[] = array('date' => $date, 'value' => (int) $count);
+            $total += (int) $count;
+        }
+
+        return rest_ensure_response(array(
+            'active'     => true,
+            'providers'  => $providers,
+            'total'      => (int) $total,
+            'forms'      => array_values($forms),
+            'timeseries' => $timeseries,
+        ));
+    }
+
+    private static function gravity_forms_active()
+    {
+        return class_exists('GFAPI');
+    }
+
+    private static function ninja_forms_active()
+    {
+        return function_exists('Ninja_Forms');
+    }
+
+    /**
+     * Add Gravity Forms submissions to the daily buckets and per-form totals.
+     * One grouped query over the entry table (GF 2.3+ `gf_entry`, older
+     * `rg_lead`); titles come from GFAPI. Read-only.
+     *
+     * @param array $days  Daily buckets, keyed Y-m-d, passed by reference.
+     * @param array $forms Per-form rows, keyed "gravity:<id>", passed by reference.
+     */
+    private static function collect_gravity_forms($start, $end, &$days, &$forms)
+    {
+        global $wpdb;
+
+        $table = self::table_name($wpdb->prefix . 'gf_entry');
+        $date_column = 'date_created';
+        if ($table === null) {
+            $table = self::table_name($wpdb->prefix . 'rg_lead');
+        }
+        if ($table === null) {
+            return;
+        }
+
+        $titles = array();
+        foreach (GFAPI::get_forms() as $form) {
+            $titles[(string) $form['id']] = $form['title'];
+        }
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT form_id, DATE({$date_column}) AS day, COUNT(*) AS total"
+            . " FROM {$table}"
+            . " WHERE status = 'active' AND {$date_column} BETWEEN %s AND %s"
+            . " GROUP BY form_id, DATE({$date_column})",
+            $start . ' 00:00:00',
+            $end . ' 23:59:59'
+        ));
+
+        foreach ((array) $rows as $row) {
+            $count = (int) $row->total;
+            if (isset($days[$row->day])) {
+                $days[$row->day] += $count;
+            }
+
+            $key = 'gravity:' . $row->form_id;
+            if (! isset($forms[$key])) {
+                $forms[$key] = array(
+                    'name'        => isset($titles[(string) $row->form_id]) ? $titles[(string) $row->form_id] : ('Form #' . $row->form_id),
+                    'source'      => 'Gravity Forms',
+                    'submissions' => 0,
+                );
+            }
+            $forms[$key]['submissions'] += $count;
+        }
+    }
+
+    /**
+     * Add Ninja Forms submissions to the daily buckets and per-form totals.
+     * Ninja Forms 3 stores each submission as an `nf_sub` post with the form id
+     * in `_form_id` postmeta; titles come from the `nf3_forms` table. Read-only.
+     *
+     * @param array $days  Daily buckets, keyed Y-m-d, passed by reference.
+     * @param array $forms Per-form rows, keyed "ninja:<id>", passed by reference.
+     */
+    private static function collect_ninja_forms($start, $end, &$days, &$forms)
+    {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT pm.meta_value AS form_id, DATE(p.post_date) AS day, COUNT(*) AS total"
+            . " FROM {$wpdb->posts} p"
+            . " INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = '_form_id'"
+            . " WHERE p.post_type = 'nf_sub' AND p.post_status = 'publish'"
+            . " AND p.post_date BETWEEN %s AND %s"
+            . " GROUP BY pm.meta_value, DATE(p.post_date)",
+            $start . ' 00:00:00',
+            $end . ' 23:59:59'
+        ));
+
+        if (empty($rows)) {
+            return;
+        }
+
+        $titles     = array();
+        $forms_table = self::table_name($wpdb->prefix . 'nf3_forms');
+        if ($forms_table !== null) {
+            foreach ((array) $wpdb->get_results("SELECT id, title FROM {$forms_table}") as $form) {
+                $titles[(string) $form->id] = $form->title;
+            }
+        }
+
+        foreach ($rows as $row) {
+            $count = (int) $row->total;
+            if (isset($days[$row->day])) {
+                $days[$row->day] += $count;
+            }
+
+            $key = 'ninja:' . $row->form_id;
+            if (! isset($forms[$key])) {
+                $forms[$key] = array(
+                    'name'        => isset($titles[(string) $row->form_id]) ? $titles[(string) $row->form_id] : ('Form #' . $row->form_id),
+                    'source'      => 'Ninja Forms',
+                    'submissions' => 0,
+                );
+            }
+            $forms[$key]['submissions'] += $count;
+        }
+    }
+
+    /**
+     * Return the exact table name if it exists, else null — so a grouped query
+     * is never run against a missing table.
+     */
+    private static function table_name($table)
+    {
+        global $wpdb;
+
+        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+
+        return $found === $table ? $table : null;
     }
 }
